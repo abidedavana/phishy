@@ -14,9 +14,18 @@ things:
    JSON / Markdown / CSV reports. All indicators are **defanged** (`hxxp`,
    `[.]`) so the reports are safe to share.
 
-Everything runs on **synthetic, safe sample data** — nothing here weaponises
-anything. The perturbations exist to measure a defender's classifier, not to
-attack anyone.
+There are **two parts** to this repo:
+
+- **`ml/`** — a trained-model phishing classifier (scikit-learn: logistic
+  regression + a model comparison, on a real 10k-URL dataset, scored with
+  accuracy / precision / recall / F1 / ROC-AUC). This answers *"can you build a
+  detector?"* See [`ml/README.md`](ml/README.md).
+- **`phishprobe/`** — this package, an adversarial harness that answers *"how
+  robust is a detector?"* by probing a classifier's decision boundary.
+
+Everything in `phishprobe` runs on **synthetic, safe sample data** — nothing here
+weaponises anything. The perturbations exist to measure a defender's classifier,
+not to attack anyone.
 
 > This maps directly to the CV line *"Probed an LLM classifier's decision
 > boundary to surface AI-model weaknesses, and extracted phishing IOCs

@@ -177,6 +177,55 @@ domains.
 
 ---
 
+## Machine-learning questions (the `ml/` notebook)
+
+This is the trained-model half — the classic ML an interviewer will drill on.
+
+**Q: Walk me through the ML pipeline.**
+A: Load a labelled dataset of 10k URLs with 16 features → stratified train/test
+split → scale features in a `Pipeline` → train logistic regression → evaluate with
+accuracy, precision, recall, F1, ROC-AUC and a confusion matrix → compare against
+Decision Tree, Random Forest, SVM, k-NN → confirm stability with 5-fold CV.
+
+**Q: Why logistic regression first?**
+A: It's the interpretable linear baseline. It outputs a probability via the sigmoid,
+it's fast, and its coefficients tell you *which features* drive the "phishing"
+decision — I can literally read why a URL was flagged.
+
+**Q: You also tried linear regression — why is that the wrong tool?**
+A: Linear regression predicts an unbounded number, not a probability — my outputs ran
+below 0 and above 1 — and it optimises squared error, not classification loss. You can
+threshold it at 0.5 but it underperforms. It's the textbook reason logistic regression
+exists.
+
+**Q: Random Forest beat logistic regression — so why not just ship it?**
+A: RF won on F1 (~0.86 vs ~0.76) because it captures non-linear feature interactions.
+But logistic regression is interpretable and cheaper, and in security "why did you
+block this?" matters. I'd weigh accuracy against explainability and latency, not just
+pick the top F1.
+
+**Q: Your logistic model had precision ~0.92 but recall ~0.65. What does that mean?**
+A: At the 0.5 threshold it rarely false-alarms (high precision) but misses ~35% of
+phishing (lower recall). I can trade one for the other by moving the threshold — that
+trade-off is exactly what the ROC curve plots. Which way you tune depends on the cost
+of a miss vs a false alarm.
+
+**Q: Why accuracy *and* F1 — isn't accuracy enough?**
+A: On a balanced 50/50 set accuracy is okay, but it hides the precision/recall split,
+and on imbalanced real traffic accuracy is misleading (a "always legit" model scores
+high). F1 (harmonic mean of precision and recall) is the honest single number.
+
+**Q: How did you guard against overfitting / a lucky split?**
+A: A held-out test set the model never trained on, plus 5-fold cross-validation — the
+logistic F1 was ~0.767 with std ~0.01, so it's stable, not a fluke of one split.
+
+**Q: How does the ML notebook relate to the adversarial `phishprobe` part?**
+A: The notebook proves I can *build* an accurate detector. `phishprobe` asks the next
+question — *is it robust?* — by perturbing inputs to find where the decision flips. A
+good test score isn't the same as resistance to evasion.
+
+---
+
 ## Honest note (for you, not the interviewer)
 
 This repo is a clean, working reconstruction of the project idea. Before you
@@ -196,3 +245,6 @@ date to when you built/rebuilt it if that's more accurate.
    (look-alike domain, reply-to mismatch) vs a legit email with none.
 4. `python -m phishprobe classify --backend llm` — (if you set a Fireworks key)
    show the same pipeline running against a real model.
+5. Open `ml/phishing_ml.ipynb` — the trained-model half: scroll to the model-
+   comparison table, the logistic-regression coefficients, and the ROC curves.
+   This is the "I trained and evaluated real classifiers" story.
