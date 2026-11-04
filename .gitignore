@@ -1,13 +1,6 @@
 __pycache__/
-*.py[cod]
+*.pyc
 .venv/
 venv/
-env/
 .env
 reports/
-!reports/.gitkeep
-.pytest_cache/
-.DS_Store
-
-# Local Claude Code settings — may contain machine-specific commands/secrets.
-.claude/

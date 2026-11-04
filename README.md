@@ -1,175 +1,66 @@
-# PhishProbe — Adversarial Testing of a Phishing Classifier
+# PhishProbe
 
-A small red-team harness for an email **phishing classifier**. It does three
-things:
+Detects phishing emails and tests how easily that detection can be fooled.
 
-1. **Classifies** emails as phishing or legitimate (offline heuristic model, or
-   a real LLM via an OpenAI-compatible API such as Fireworks AI).
-2. **Probes the classifier's decision boundary** with adversarial, meaning-
-   preserving perturbations — the evasion tradecraft real phishers use — and
-   measures which changes flip the verdict. That's how you surface a model's
-   blind spots.
-3. **Extracts phishing IOCs** (malicious URLs, look-alike domains, spoofed
-   sender metadata, IP-literal links, urgency language) into structured
-   JSON / Markdown / CSV reports. All indicators are **defanged** (`hxxp`,
-   `[.]`) so the reports are safe to share.
+It labels each email as phishing or legit and pulls the URLs, look-alike domains and spoofed headers into a report, with the links defanged. Then it rewrites the emails it caught using tricks real phishers use and checks which ones change the verdict.
 
-There are **two parts** to this repo:
+The sample emails are made up.
 
-- **`ml/`** — a trained-model phishing classifier (scikit-learn: logistic
-  regression + a model comparison, on a real 10k-URL dataset, scored with
-  accuracy / precision / recall / F1 / ROC-AUC). This answers *"can you build a
-  detector?"* See [`ml/README.md`](ml/README.md).
-- **`phishprobe/`** — this package, an adversarial harness that answers *"how
-  robust is a detector?"* by probing a classifier's decision boundary.
-
-Everything in `phishprobe` runs on **synthetic, safe sample data** — nothing here
-weaponises anything. The perturbations exist to measure a defender's classifier,
-not to attack anyone.
-
-> This maps directly to the CV line *"Probed an LLM classifier's decision
-> boundary to surface AI-model weaknesses, and extracted phishing IOCs
-> (malicious URLs, spoofed metadata) into structured reports."*
-
----
-
-## Quick start (zero setup, no API key)
+## Usage
 
 ```bash
-python run_demo.py
+python -m phishprobe
 ```
 
-That runs the whole pipeline on the bundled samples with the offline heuristic
-backend and writes reports to `./reports/`. Then explore:
+This only needs Python. Results go to `reports/report.md`, with the full data in `reports/report.json`.
+
+To check your own emails, put them in a JSONL file with one email per line and pass it with `--email`:
 
 ```bash
-python -m phishprobe classify              # label emails, score accuracy
-python -m phishprobe extract  --out reports   # IOCs -> json/md/csv
-python -m phishprobe probe    --out reports   # decision-boundary probe
-python -m phishprobe report   --out reports   # extract + probe together
+python -m phishprobe --email my_emails.jsonl
 ```
 
-Run the tests:
+Each line looks like this. Missing fields count as empty, and `label` is optional (`phishing` or `legit`, only used to work out accuracy):
+
+```json
+{"id": "1", "subject": "Your account", "from_display": "PayPal", "from_addr": "help@paypa1.xyz", "reply_to": "", "return_path": "", "body": "Verify your account here: http://paypa1.xyz/login", "label": "phishing"}
+```
+
+To use an LLM instead of the built-in heuristic classifier:
+
+```bash
+pip install -r requirements.txt
+export PHISHPROBE_API_KEY=your_key
+python -m phishprobe --backend llm
+```
+
+It uses Fireworks by default. Set `PHISHPROBE_BASE_URL` and `PHISHPROBE_MODEL` to use another OpenAI-compatible API. A run on the sample emails makes 76 API calls.
+
+To run the tests:
 
 ```bash
 python -m unittest discover -s tests
 ```
 
-Only the standard library is needed for the offline path. `requests` is only
-required if you switch on the LLM backend.
+## The tricks
 
----
+- `soften_urgency` tones down pressure language
+- `benign_padding` adds friendly filler text
+- `homoglyph_swap` swaps letters in trigger words for Cyrillic look-alikes
+- `zero_width_injection` hides zero-width spaces inside trigger words
+- `url_shortener` hides links behind a shortener
+- `align_reply_to` makes Reply-To and Return-Path match From
+- `strip_display_brand` replaces a brand display name with a generic one
+- `neutral_sender` sends from a Gmail address
 
-## Using a real LLM (Fireworks AI / OpenAI)
+Each one is tried alone, then the ones that lowered the score are stacked together.
 
-The LLM backend calls any **OpenAI-compatible** `/chat/completions` endpoint.
-Copy `.env.example` to `.env`, fill in a key, and export the vars (or set them
-in your shell):
+## Results
 
-```bash
-pip install requests
-export PHISHPROBE_BACKEND=llm
-export PHISHPROBE_API_KEY=fw_xxx
-export PHISHPROBE_BASE_URL=https://api.fireworks.ai/inference/v1
-export PHISHPROBE_MODEL=accounts/fireworks/models/gpt-oss-120b
+The heuristic gets all 11 sample emails right. No single trick gets a phishing email past it, but stacking them gets all 6 through. `url_shortener` does the most damage because it removes every URL signal in one go.
 
-python -m phishprobe classify --backend llm
-python -m phishprobe probe    --backend llm --out reports
-```
+The heuristic only looks for technical signs like bad domains, mismatched headers and urgent wording, so a plain scam from a normal Gmail address can get through.
 
-List the models your Fireworks key can access (model IDs change over time):
+## ml/
 
-```bash
-curl -H "Authorization: Bearer $PHISHPROBE_API_KEY" \
-     https://api.fireworks.ai/inference/v1/models
-```
-
-Point `PHISHPROBE_BASE_URL` / `PHISHPROBE_MODEL` at OpenAI (`gpt-4o-mini`) or a
-local server and it works unchanged. If no key is set, the backend safely falls
-back to the heuristic so nothing breaks.
-
----
-
-## How the decision-boundary probe works
-
-1. Take a seed email the classifier **already flags as phishing** (you can't
-   "evade" a detection that never fired).
-2. Apply each adversarial perturbation at increasing **strength** (0.25 → 1.0)
-   and re-classify. Record whether the verdict flipped phishing → legit and how
-   far the phishing score moved.
-3. Chain every technique that helped into one **combined attack** and re-test.
-4. Aggregate into a per-technique **evasion rate**, **minimum flip strength**
-   (how close to the boundary the sample was), and **average score drop**.
-
-### Perturbations (all semantics-preserving)
-
-| Technique | What it does | Signal it targets |
-|-----------|--------------|-------------------|
-| `soften_urgency` | Removes/softens pressure language | urgency keywords |
-| `benign_padding` | Adds legitimate-sounding filler | keyword density |
-| `homoglyph_swap` | Unicode look-alike letters in trigger words | keyword matching |
-| `zero_width_injection` | Zero-width spaces inside trigger words | keyword matching |
-| `url_shortener` | Hides the URL behind a neutral shortener | look-alike domain / bad TLD / IP link |
-| `align_reply_to` | Makes Reply-To/Return-Path match From | header mismatch |
-| `strip_display_brand` | Neutralises a brand-y display name | display-name spoof |
-| `neutral_sender` | Sends from a free-webmail address (compromised-account style) | sender-domain reputation |
-
-### What the demo finds
-
-On the bundled heuristic classifier (100% accuracy on the labelled set):
-
-- **No single technique evades** it — the classifier's defence-in-depth of
-  stacked structural + text signals holds against any one perturbation.
-- The **combined attack evades 100%** of seeds. The classifier is individually
-  robust but **jointly brittle**.
-- The **highest-leverage single lever is `url_shortener`** — because the model
-  weights URL structure (look-alike domains, suspicious TLDs, IP literals)
-  heavily, and hiding the link behind a shortener strips all of that at once.
-
-The takeaway a defender acts on: **don't let any one signal family carry the
-decision, and treat link-shortened URLs as first-class risk** (expand them
-before scoring).
-
----
-
-## IOC extraction
-
-`extract_iocs()` returns a structured, severity-ranked list per email:
-
-- **URLs / domains / IPs** — refanged, parsed, then re-defanged for the report.
-- **Look-alike domains** — token-level similarity vs a known-brand list
-  (`paypa1-secure.com` → PayPal), plus punycode (`xn--`) and unicode homoglyph
-  detection.
-- **Header / sender spoofing** — Reply-To ≠ From, Return-Path ≠ From, and
-  display-name-claims-a-brand-the-domain-isn't.
-- **Suspicious TLDs** and **social-engineering language**.
-
-Output: `reports/ioc_report.{json,md,csv}`.
-
----
-
-## Project layout
-
-```
-phishprobe/
-  classifier.py     # HeuristicClassifier + LLMClassifier (OpenAI-compatible)
-  perturbations.py  # adversarial, semantics-preserving transforms
-  prober.py         # decision-boundary probing loop + aggregation
-  iocs.py           # IOC extraction, refang/defang, look-alike detection
-  report.py         # JSON / Markdown / CSV writers
-  cli.py            # `python -m phishprobe ...`
-data/samples.jsonl  # synthetic phishing + legit emails (safe)
-tests/              # unittest suite (22 tests)
-run_demo.py         # one-command end-to-end demo
-INTERVIEW.md        # talking points + likely Q&A
-```
-
-## Safety & scope
-
-- All sample data is synthetic (`example`-style and clearly fake look-alike
-  domains). No real malware, credentials, or live malicious links.
-- Report indicators are defanged so they can't be clicked by accident.
-- The perturbations measure a classifier you own; they are not a phishing kit.
-- The heuristic model is intentionally simple and interpretable — the project's
-  value is the **probing methodology and reporting**, not a state-of-the-art
-  detector.
+A separate notebook that trains URL classifiers on a 10,000 URL dataset. See [ml/README.md](ml/README.md).

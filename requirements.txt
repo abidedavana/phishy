@@ -1,5 +1,1 @@
-# Core pipeline (classify, extract, probe, report, demo, tests) uses only the
-# Python 3.10+ standard library — no install needed to run run_demo.py.
-
-# Optional: only required for the LLM backend (Fireworks AI / OpenAI-compatible).
 requests>=2.31.0

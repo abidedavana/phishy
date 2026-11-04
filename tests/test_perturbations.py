@@ -1,18 +1,11 @@
-import os
-import sys
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from phishprobe.__main__ import load_emails
+from phishprobe.classifier import heuristic
+from phishprobe.perturbations import PERTURBATIONS, align_reply_to, soften_urgency
+from phishprobe.prober import probe, probe_seed
 
-from phishprobe.classifier import HeuristicClassifier
-from phishprobe.perturbations import (
-    PERTURBATIONS, homoglyph_swap, align_reply_to, soften_urgency,
-)
-from phishprobe.prober import DecisionBoundaryProber
-from phishprobe.cli import load_emails
-
-DATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                    "data", "samples.jsonl")
+DATA = "data/samples.jsonl"
 
 PHISH = {
     "id": "p", "subject": "Urgent: verify your account",
@@ -23,57 +16,40 @@ PHISH = {
 }
 
 
-class TestPerturbationsPreserveInput(unittest.TestCase):
+class TestPerturbations(unittest.TestCase):
     def test_original_not_mutated(self):
         original = dict(PHISH)
-        homoglyph_swap(PHISH, 1.0)
-        self.assertEqual(PHISH, original)  # transforms return copies
+        for perturb in PERTURBATIONS.values():
+            perturb(PHISH)
+        self.assertEqual(PHISH, original)
 
     def test_align_reply_to_matches_from_domain(self):
-        out = align_reply_to(PHISH, 1.0)
+        out = align_reply_to(PHISH)
         self.assertTrue(out["reply_to"].endswith("paypa1-secure.com"))
         self.assertTrue(out["return_path"].endswith("paypa1-secure.com"))
 
     def test_soften_removes_urgency_terms(self):
-        out = soften_urgency(PHISH, 1.0)
-        self.assertNotIn("immediately", out["body"].lower())
-
-    def test_all_perturbations_return_dicts(self):
-        for name, fn in PERTURBATIONS.items():
-            out = fn(PHISH, 0.5)
-            self.assertIsInstance(out, dict, name)
-            self.assertIn("body", out, name)
+        self.assertNotIn("immediately", soften_urgency(PHISH)["body"].lower())
 
 
 class TestProber(unittest.TestCase):
     def test_probe_only_runs_on_flagged_phish(self):
-        clf = HeuristicClassifier()
-        prober = DecisionBoundaryProber(clf)
-        # a legit email should not be probed (returns None)
         legit = {"id": "l", "subject": "notes", "from_addr": "s@company.com",
                  "reply_to": "s@company.com", "return_path": "s@company.com",
                  "from_display": "Sarah", "body": "notes are in the drive"}
-        self.assertIsNone(prober.probe_seed(legit))
-
-    def test_run_produces_summary(self):
-        clf = HeuristicClassifier()
-        result = DecisionBoundaryProber(clf).run(load_emails(DATA))
-        self.assertIn("per_technique", result.summary)
-        self.assertGreater(result.summary["seeds_probed"], 0)
-        self.assertEqual(len(result.summary["most_effective"]), 3)
-
-    def test_summary_has_verdict(self):
-        clf = HeuristicClassifier()
-        result = DecisionBoundaryProber(clf).run(load_emails(DATA))
-        v = result.summary["verdict"]
-        self.assertTrue(v.startswith(("ROBUST", "JOINTLY BRITTLE", "BRITTLE")))
+        self.assertIsNone(probe_seed(legit, heuristic))
 
     def test_at_least_one_technique_moves_the_score(self):
-        clf = HeuristicClassifier()
-        seed = DecisionBoundaryProber(clf).probe_seed(PHISH)
-        self.assertIsNotNone(seed)
-        drops = [v["max_score_drop"] for v in seed.per_technique.values()]
-        self.assertTrue(any(d > 0 for d in drops))
+        seed = probe_seed(PHISH, heuristic)
+        self.assertTrue(any(r["score_drop"] > 0 for r in seed["techniques"].values()))
+
+    def test_headline_finding_on_the_samples(self):
+        result = probe(load_emails(DATA), heuristic)
+        self.assertEqual(result["seeds_probed"], 6)
+        self.assertTrue(all(r["evasion_rate"] == 0 for r in result["per_technique"].values()))
+        self.assertEqual(result["combined_attack_evasion_rate"], 1.0)
+        self.assertEqual(result["most_effective"][0], "url_shortener")
+        self.assertTrue(result["verdict"].startswith("JOINTLY BRITTLE"))
 
 
 if __name__ == "__main__":

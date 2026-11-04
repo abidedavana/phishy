@@ -1,43 +1,20 @@
-"""Adversarial perturbations.
+"""Evasion techniques. Each one takes an email and returns a changed copy."""
 
-Each perturbation is a semantics-preserving transform: it keeps the email a
-phishing attempt (a human would still be fooled) while trying to reduce the
-signals a classifier keys on. Running them against the classifier maps out
-which signals actually hold the decision — i.e. where the boundary is.
-
-Every transform takes (email: dict, strength: float in 0..1) and returns a new
-email dict; the original is never mutated. strength=0 is a near no-op, 1.0 is
-the most aggressive version of that technique.
-
-Note: these mirror real evasion tradecraft, but applied only to synthetic
-samples for measurement. Nothing here weaponises anything — it exists to show
-the classifier's blind spots so they can be defended.
-"""
-
-from __future__ import annotations
-
-import copy
 import hashlib
 import re
-from typing import Callable
 
-# Look-alike unicode homoglyphs for common ASCII letters.
-_HOMOGLYPHS = {
-    "a": "а",  # cyrillic a
-    "e": "е",  # cyrillic e
-    "o": "о",  # cyrillic o
-    "i": "і",  # cyrillic dotless-style i
-    "c": "с",  # cyrillic c
-    "p": "р",  # cyrillic p
-}
-_ZWSP = "​"  # zero-width space
+# Cyrillic look-alikes
+_HOMOGLYPHS = str.maketrans({
+    "a": "а", "e": "е", "o": "о", "i": "і", "c": "с", "p": "р",
+    "A": "а", "E": "е", "O": "о", "I": "і", "C": "с", "P": "р",
+})
+_ZERO_WIDTH_SPACES = "​" * 2
 
-# Trigger words we try to hide from keyword-based detection.
-_TRIGGERS = [
+_TRIGGERS = {
     "verify", "verified", "suspend", "suspended", "urgent", "password",
     "confirm", "account", "immediately", "expire", "expires", "locked",
-    "billing", "credentials", "login", "log in", "sign in",
-]
+    "billing", "credentials", "login",
+}
 
 _URGENCY_PHRASES = [
     (r"within 24 hours", "at your convenience"),
@@ -45,7 +22,6 @@ _URGENCY_PHRASES = [
     (r"urgent[:!]?", ""),
     (r"will be permanently suspended", "may need attention"),
     (r"will be disabled", "should be reviewed"),
-    (r"or your account will be disabled", ""),
     (r"action needed", "for your reference"),
     (r"action required", "for your reference"),
 ]
@@ -55,160 +31,64 @@ _BENIGN_PADDING = (
     "trust and are always here to help with any questions. Have a great day."
 )
 
-
-def _clone(email: dict) -> dict:
-    return copy.deepcopy(email)
-
-
-def homoglyph_swap(email: dict, strength: float = 1.0) -> dict:
-    """Replace some ASCII letters in the body with look-alike unicode.
-
-    Hides trigger words from literal substring matching while staying readable
-    to a human. Higher strength swaps a larger fraction of eligible letters.
-    """
-    e = _clone(email)
-    body = e.get("body", "") or ""
-
-    def swap_word(w: str) -> str:
-        chars = list(w)
-        for idx, ch in enumerate(chars):
-            low = ch.lower()
-            if low in _HOMOGLYPHS and (idx % max(1, round(1 / max(strength, 0.01))) == 0):
-                chars[idx] = _HOMOGLYPHS[low]
-        return "".join(chars)
-
-    out = []
-    for token in re.split(r"(\s+)", body):
-        if token.strip().lower().strip(".,:;!?") in _TRIGGERS:
-            out.append(swap_word(token))
-        else:
-            out.append(token)
-    e["body"] = "".join(out)
-    return e
+# also matches defanged URLs
+_URL_RE = re.compile(r"(?:h\s*x\s*x\s*ps?|https?)://[^\s<>\"')]+|www\.[^\s<>\"')]+", re.I)
 
 
-def zero_width_injection(email: dict, strength: float = 1.0) -> dict:
-    """Insert zero-width spaces inside trigger words (e.g. 'ver<zwsp>ify')."""
-    e = _clone(email)
-    body = e.get("body", "") or ""
-    n = max(1, round(strength * 2))  # how many zwsp to sprinkle per word
-
-    def zwsp_word(w: str) -> str:
-        if len(w) < 3:
-            return w
-        pos = len(w) // 2
-        return w[:pos] + (_ZWSP * n) + w[pos:]
-
-    out = []
-    for token in re.split(r"(\s+)", body):
-        core = token.strip(".,:;!?").lower()
-        out.append(zwsp_word(token) if core in _TRIGGERS else token)
-    e["body"] = "".join(out)
-    return e
+def _rewrite_triggers(body, rewrite):
+    def replace(match):
+        word = match.group()
+        return rewrite(word) if word.strip(".,:;!?").lower() in _TRIGGERS else word
+    return re.sub(r"\S+", replace, body)
 
 
-def soften_urgency(email: dict, strength: float = 1.0) -> dict:
-    """Remove or soften urgency / pressure language."""
-    e = _clone(email)
-    body = e.get("body", "") or ""
-    subject = e.get("subject", "") or ""
-    cutoff = max(1, round(len(_URGENCY_PHRASES) * strength))
-    for pat, repl in _URGENCY_PHRASES[:cutoff]:
-        body = re.sub(pat, repl, body, flags=re.I)
-        subject = re.sub(pat, repl, subject, flags=re.I)
-    e["body"] = re.sub(r"\s{2,}", " ", body).strip()
-    e["subject"] = re.sub(r"\s{2,}", " ", subject).strip()
-    return e
+def soften_urgency(email):
+    def soften(text):
+        for pattern, replacement in _URGENCY_PHRASES:
+            text = re.sub(pattern, replacement, text, flags=re.I)
+        return re.sub(r"\s{2,}", " ", text).strip()
+    return {**email, "subject": soften(email["subject"]), "body": soften(email["body"])}
 
 
-def benign_padding(email: dict, strength: float = 1.0) -> dict:
-    """Dilute suspicious content with legitimate-sounding filler text."""
-    e = _clone(email)
-    reps = max(1, round(strength * 3))
-    e["body"] = (e.get("body", "") or "") + (_BENIGN_PADDING * reps)
-    return e
+def benign_padding(email):
+    return {**email, "body": email["body"] + _BENIGN_PADDING * 3}
 
 
-def align_reply_to(email: dict, strength: float = 1.0) -> dict:
-    """Make Reply-To / Return-Path match the From domain (hides header spoof).
-
-    strength >= 0.5 also aligns Return-Path; below that only Reply-To.
-    """
-    e = _clone(email)
-    from_addr = e.get("from_addr", "") or ""
-    if "@" in from_addr:
-        dom = from_addr.split("@")[-1]
-        e["reply_to"] = f"support@{dom}"
-        if strength >= 0.5:
-            e["return_path"] = f"bounce@{dom}"
-    return e
+def homoglyph_swap(email):
+    return {**email, "body": _rewrite_triggers(email["body"],
+                                               lambda word: word.translate(_HOMOGLYPHS))}
 
 
-# Neutral-looking shortener hosts: no brand look-alike, no suspicious TLD.
-_SHORTENERS = ["bit.ly", "tinyurl.com", "t.co", "rebrand.ly"]
-
-# Matches live and defanged URLs so both get rewritten.
-_URL_IN_BODY = re.compile(
-    r"(?:h\s*x\s*x\s*ps?|https?)://[^\s<>\"')]+|www\.[^\s<>\"')]+", re.I
-)
+def zero_width_injection(email):
+    def split(word):
+        middle = len(word) // 2
+        return word[:middle] + _ZERO_WIDTH_SPACES + word[middle:]
+    return {**email, "body": _rewrite_triggers(email["body"], split)}
 
 
-def url_shortener(email: dict, strength: float = 1.0) -> dict:
-    """Hide destination URLs behind a link-shortener (real-world #1 evasion).
-
-    Replaces look-alike / suspicious-TLD / IP-literal links with a neutral
-    shortener URL. The email is still phishing — the link still leads somewhere
-    hostile — but the structural signals a URL-based classifier keys on are
-    gone. strength < 0.5 only rewrites the first URL; >= 0.5 rewrites all.
-    """
-    e = _clone(email)
-    body = e.get("body", "") or ""
-    only_first = strength < 0.5
-    state = {"done": False}
-
-    def repl(m: re.Match) -> str:
-        if only_first and state["done"]:
-            return m.group(0)
-        state["done"] = True
-        code = hashlib.md5(m.group(0).encode("utf-8")).hexdigest()[:7]
-        return f"https://{_SHORTENERS[0]}/{code}"
-
-    e["body"] = _URL_IN_BODY.sub(repl, body)
-    return e
+def url_shortener(email):
+    def shorten(match):
+        code = hashlib.md5(match.group().encode("utf-8")).hexdigest()[:7]
+        return f"https://bit.ly/{code}"
+    return {**email, "body": _URL_RE.sub(shorten, email["body"])}
 
 
-def strip_display_brand(email: dict, strength: float = 1.0) -> dict:
-    """Replace a brand-y display name with a neutral one (hides name spoof)."""
-    e = _clone(email)
-    e["from_display"] = "Customer Service" if strength >= 0.5 else "Support Team"
-    return e
+def align_reply_to(email):
+    domain = email["from_addr"].split("@")[-1]
+    return {**email, "reply_to": f"support@{domain}", "return_path": f"bounce@{domain}"}
 
 
-# A generic, real free-webmail sender — simulates a compromised or throwaway
-# account, the way real BEC / account-takeover phishing evades sender reputation.
-_NEUTRAL_SENDER = ("Account Services", "account.services.notice@gmail.com")
+def strip_display_brand(email):
+    return {**email, "from_display": "Customer Service"}
 
 
-def neutral_sender(email: dict, strength: float = 1.0) -> dict:
-    """Send from a benign free-webmail address instead of a look-alike domain.
-
-    Removes the sender-domain signal (brand look-alike, bad TLD) that both
-    heuristic and LLM classifiers lean on, while the body stays malicious — a
-    compromised-account phish. strength >= 0.5 also aligns Reply-To/Return-Path
-    so no header mismatch remains.
-    """
-    e = _clone(email)
-    name, addr = _NEUTRAL_SENDER
-    e["from_display"] = name
-    e["from_addr"] = addr
-    if strength >= 0.5:
-        e["reply_to"] = addr
-        e["return_path"] = addr
-    return e
+def neutral_sender(email):
+    address = "account.services.notice@gmail.com"
+    return {**email, "from_display": "Account Services", "from_addr": address,
+            "reply_to": address, "return_path": address}
 
 
-# name -> transform. Order is roughly weakest-signal-first.
-PERTURBATIONS: dict[str, Callable[[dict, float], dict]] = {
+PERTURBATIONS = {
     "soften_urgency": soften_urgency,
     "benign_padding": benign_padding,
     "homoglyph_swap": homoglyph_swap,
@@ -218,11 +98,3 @@ PERTURBATIONS: dict[str, Callable[[dict, float], dict]] = {
     "strip_display_brand": strip_display_brand,
     "neutral_sender": neutral_sender,
 }
-
-
-def apply_chain(email: dict, names: list[str], strength: float = 1.0) -> dict:
-    """Apply several perturbations in sequence (a combined attack)."""
-    e = email
-    for n in names:
-        e = PERTURBATIONS[n](e, strength)
-    return e
